@@ -1,0 +1,257 @@
+
+	  ==========================
+	  SAFEDRIVE DB SPECIFICATION
+	  Version 1.0 - Feb. 2017
+	  ==========================
+	  Author:
+	      Krista Koivisto
+	      
+	  License:
+	      Public Domain
+	  ==========================
+
+				Index
+---------------------------------------
+	1.0   Introduction
+	2.0   Format Overview
+	2.1   SDB Format
+	2.1.1 SDB Format Structure
+	2.2   EDB Format
+	2.3   SIG Format
+	3.0   Protocol
+	3.1   Integrity Check
+	3.1.1 Corruption Handling
+	3.2   Database Update
+	3.3   User Notification
+	4.0   License
+---------------------------------------
+
+1.0 Introduction
+----------------
+
+The SafeDrive DB protocol is an attempt at creating a simple database system
+designed to hold information about symmetrically encrypted and anonymized files
+which have been backed up automatically by a daemon process. This file specifies
+suggested protocol for such a system.
+
+In order to anonymize files entirely, they should be stripped of file names after
+encryption and any directory structure should not be maintained on the remote
+location. Then, to be able to restore these anonymized files with no other
+information than a key, a database encrypted using said key and containing the
+original file names and directory structure must be stored on the server alongside
+the files. Files should be renamed to their SHA-1 checksum value as it can safely
+be assumed to be unique and makes looking up the correct file easy.
+
+So we do not have to constantly download an ever growing database, an unencrypted
+copy should be kept locally and compared against the server version for integrity.
+This should be done by comparing checksums of both databases. Since the server
+version is encrypted, it cannot be tampered with without the key and without being
+destroyed. Under circumstances where the two databases mismatch, the remote 
+version is therefore considered authoritative. Unfortunately because it is
+encrypted it also means we cannot simply append new data to it, so it has to be
+uploaded in full after every session.
+
+The SafeDrive DB protocol is an attempt at implementing this process in as simple
+a manner as possible, while maintaining anonymity and integrity as top priorities.
+
+
+
+
+2.0 Format Overview
+-------------------
+
+There are three different file formats in the SafeDrive database design. The first
+two, the SDB and EDB file formats, are both copies of the actual database. The SDB
+file is the unencrypted database kept on the local machine. Because the local
+database is very likely to be gone in the event of data loss, an encrypted version
+must be kept on the server. This is the EDB file, which should be encrypted using
+symmetric encryption so the user can restore it using only a key.
+
+The third file, SIG, contains the SHA-1 checksum of the EDB file before it was
+encrypted. It is used for easy verification of database integrity both locally and
+on the remote server. It has to be encrypted as well to protect it from tampering.
+
+
+2.1 SDB Format:
+---------------
+
+The SDB format is a simple binary database format designed to store information
+about the encrypted files stored on the server. It has been designed with quick
+SHA-1 checksum and file name lookups in mind. This unencrypted version of the
+database must only ever be stored locally.
+
+2.1.1 SDB Format Structure
+--------------------------
+
+The file opens with 8 magic bytes, which are:
+
+0x00 - 0x02 | 0x53 0x44 0x42 (SDB in ASCII)
+0x03 - 0x04 | 0x3A 0x07		 (Magic! Confirms it is indeed a SafeDrive SDB file.)
+0x05 - 0x06 | 0x00 0x00		 (Reserved)
+0x07		| 0x01			 (SDB file format version)
+
+Following the magic bytes, the file is structured as follows:
+
+SHA-1 Checksum 			(static length, 20 bytes)
+Unix Timestamp 			(static length, 8 bytes)
+Revision	   			(dword (4 bytes), endianness system dependent)
+Name/		   			(variable length, max. 256 bytes)
+Original Directory\0	(variable length, max 4096 bytes)
+
+The / character after the name field is a delimiter, chosen because it is the only
+non-NULL character not allowed in file names and should therefore never cause any
+confusion for the parser.
+
+The NULL character '\0' marks the end of a row, and the next row follows
+immediately after that. The SHA-1 checksum is kept in raw format, that is, it is
+not stored as a 40-byte string but rather as the 20-byte binary value. This is
+also true of the unix timestamp, which has only been afforded 8 bytes for 64-bit
+compatibility in the future.
+
+Reasoning behind this structure:
+
+* SHA-1 comes first as it has a static length of 20 bytes. This means it costs
+  nothing computationally to skip to the next category. The checksum of the file
+  is the most accessed field so we need easy access to it.
+  
+* The timestamp comes second because of static length. It has been given 64 bits
+  of space to allow for a seamless update to 64-bit Unix time whenever that
+  becomes the new standard.
+  
+* Revision is also a static size (dword), so this was a good place to put it. :)
+  
+* Name comes first after the static length strings, and is what the database
+  should be indexed by. This is done so files can easily be searched for by name.
+ 
+
+* Directory of origin comes last because the delimiter used by SDB is the forward
+  slash. This delimiter was picked specifically because it may never occur in file
+  names. By having the directory last we avoid confusion as to where the directory
+  field begins and where it ends. It also allows for easy search by directory.
+
+
+2.2 EDB Format
+--------------
+
+The EDB format is simply the SDB file encrypted using a symmetric encryption
+algorithm. This format is intended to be kept with the anonymized and encrypted
+files on a remote drive. It must always be accompanied by a SIG format file by the
+same name. Since this file must be uploaded in full after every session, it would
+be a good idea to perform compression along with encryption. GPGME for example
+offers both with OpenPGP, but any safe algorithm may be used.
+
+This file may be kept in as many locations as the user wants. If all copies of
+this file should be lost or corrupted on the server and the local file was
+simultaneously lost, it would mean that backups could not be restored with name
+and directory information intact. The user would then have to go by file creation
+dates to figure out revisions.
+
+
+2.3 SIG Format
+--------------
+
+This file contains only the SHA-1 checksum of the accompanying EDB file as it was
+before encryption. This is used to verify that the databases have not been
+corrupted in any way. If the checksum of the local SDB and the one contained in
+this file match, we know the databases are also identical.
+
+It must be encrypted in the same way as the database to avoid tampering.
+
+
+
+
+3.0 Protocol
+------------
+
+The following guidelines for implementation should be followed strictly to ensure
+complete integrity and anonymity.
+
+
+3.1 Confirming Integrity
+------------------------
+
+Whenever the daemon process is started, a database integrity check must be
+performed. This should be done by downloading the SIG file, decrypting it and
+comparing the signature it contains against the SHA-1 checksum of the local
+database.
+
+In the event of a mismatch between the remote and local versions, one or the other
+must be assumed to have become corrupted. As the server version is encrypted and
+can only be tampered with by someone who has the passphrase, it is the one trusted
+by default. It should be downloaded, decrypted and compared against the SIG file
+signature. If it matches, the data from the EDB should replace the local SDB data.
+
+It should, however, be possible for the user to choose to always trust the local
+version over the remote version. The user should also be able to instruct (through
+a config file, for example) to end the backup process in the event of mismatching
+databases, so that he or she can manually confirm the integrity of either
+database.
+
+3.1.1 Corruption Handling
+-------------------------
+
+If the remote database has been modified in any way by someone without the key it
+will fail to decrypt. The user must be notified and the local database should be
+used in place of the remote one, unless the user has specified otherwise.
+
+In the event of a completely missing remote database, we default to trusting the
+local database unless the user has specified otherwise. The same setting as above
+may be used to determine how the user wants the application to respond. The user
+must be notified of this event.
+
+If the remote version decrypts but the resulting database does not match the SIG
+file checksum we have to assume the key has been compromised. It is possible that
+an older version of the database has been uploaded for whatever reason. However,
+since we cannot know for sure we should halt the process and notify the user.
+
+
+3.2 Database Update
+-------------------
+
+Whenever an updated version of the database has been created locally, it must be
+synchronized with the remote database. The update should happen according to this
+protocol:
+
+1. Rename the old remote database.
+3. Rename the old signature file.
+4. Begin uploading the new database.
+5. If the upload fails, replace the old database and signature files and start
+   over. If failure happens 3 times in a row, stop and inform the user.
+6. Upload the new signature file.
+7. If specified by user, download the database and SIG and confirm integrity.
+   If the integrity check fails, replace the old database and signature files and
+   start over. In the event of 3 failures in a row, stop and inform the user.
+8. Remove the old database and signature files.
+
+If the failure in step 5 happened for known reasons such as running out of disk
+space on the remote location, the process can be stopped right away and the user
+informed. It is important to upload the database first and only upon successful
+completion of the upload, to upload the signature file. Otherwise we may end up
+with a mismatching signature and database.
+
+3.3 User Notification
+---------------------
+
+User notification can be done through logs or, if your application supports it,
+by sending an e-mail and/or SMS to the user. It is advisable to instruct the user
+to let the cron daemon mail them the output of your application if it is intended
+to run as a cron job.
+
+
+
+
+4.0 License
+-----------
+
+The SafeDrive DB system is released into the public domain. This means you can do
+with it as you please. If you feel like improving it or using it for your own
+projects, whether commercial or not, you are free to do so. No attribution is
+required.
+
+If you do improve upon it, I would love to see what you come up with but it is by
+no means a requirement. :)
+
+
+
+
+
